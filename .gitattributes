@@ -1,0 +1,10 @@
+# 统一成 LF，Windows 批处理脚本除外
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不要做行尾转换
+*.png binary
+*.wav binary
+*.jar binary
+*.keystore binary

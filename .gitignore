@@ -1,0 +1,14 @@
+node_modules
+dist
+*.local
+.DS_Store
+
+# 打包产物，源码包里不需要
+*.apk
+*.aab
+deadline-source*.zip
+
+# 构建缓存与编辑器本地状态
+android/.kotlin
+.idea
+.vscode
