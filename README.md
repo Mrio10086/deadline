@@ -27,7 +27,7 @@ New-NetFirewallRule -DisplayName "Vite dev 5173" -Direction Inbound -Protocol TC
 其他命令：
 
 ```bash
-npm test         # 跑单元测试（107 个）
+npm test         # 跑单元测试（138 个）
 npm run typecheck # 只做类型检查
 npm run build    # 类型检查 + 生产构建到 dist/
 npm run preview  # 预览生产构建
