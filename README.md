@@ -124,31 +124,125 @@ adb install -r android\app\build\outputs\apk\debug\app-debug.apk
 - 不做账号登录、云同步、多设备同步；换设备靠 JSON 备份搬。
 - 单一时区（Asia/Shanghai）、单一学期；`.ics` 用浮动本地时间，不含 VTIMEZONE。
 
-## 下一步
+## 架构
 
-用 WebView 登录教务系统自动抓取课表：**需要先拿到课程表网址**，才能判断是正方 / 强智 / URP / 自建系统。
-代码结构已经把它隔离好了——抓取只需产出 `CourseDraft[]` 交给 `addCourses()`，UI 和业务逻辑都不用动。
+### 分层
 
-## 代码结构
+```text
+UI 层          pages/（今天 / 课表 / 待办 / 设置）、components/ui.tsx
+                      ↓ useApp() / useQuickAdd()
+状态层         state/store.tsx（全局状态 + 持久化）、state/quickAdd.ts（跨页指令）
+                      ↓
+纯逻辑层       lib/ ics  weeks  periods  parseCourses  reminders
+               notifyPlan  tasks  freeSlots  courseColors
+               ← 不碰 DOM、不碰原生 API、无副作用，138 个单测全压在这一层
+                      ↓
+平台适配层     lib/ platform  notifications  reminderSync  storage  saveFile  download
+                      ↓
+两个宿主       浏览器宿主：网页通知 + 下载 .ics
+               Capacitor WebView：安卓原生本地通知
+```
+
+这条分层是刻意设计的。**周次推算、提醒时刻、ICS 格式这些最容易算错的部分全放在纯函数里**，
+所以不用 jsdom、不用模拟器就能测全，138 个用例跑完只要 4 秒。
+后来加安卓原生通知时，改动只落在平台适配层，`lib/` 一行没动。
+
+### 数据流
+
+```text
+【录入】
+  批量文本 ─ parseCourseLines ─► CourseDraft[] ─ addCourses ─► Course[]
+  手动填写 ──────────────────► CourseDraft[] ─ addCourses ─► Course[]
+  待办表单 ─────────────────────────────────────────────────► Task[]
+                                  │
+                                  ▼
+                    state/store.tsx ──► localStorage
+
+【推算：三种提醒方式共用同一份结果】
+  remindersForDate(tasks, courses, settings, date) ──► ReminderItem[]
+            │
+            ├─► notifyPlan() ──► Capacitor LocalNotifications ──► 安卓 AlarmManager
+            ├─► buildIcs()   ──► 分享 / 下载 ──► 系统日历（由它负责准点提醒）
+            └─► useReminderTicker() ──► 浏览器 Notification（只在页面打开时）
+```
+
+`ReminderItem` 是关键抽象：不管提醒最终走系统通知、系统日历还是浏览器弹窗，
+上游都只算一次「这节课什么时候上、提前多久提醒」。
+
+### 目录说明
 
 ```text
 src/
-  lib/               纯逻辑，基本都有单测
-    ics.ts           .ics 生成（RFC 5545 折行、转义、周次展开）
-    weeks.ts         周次 / 日期推算
-    periods.ts       作息时间表
-    parseCourses.ts  批量录入文本解析
-    reminders.ts     提醒时刻推算（单日 + 多日展开）
-    notifyPlan.ts    提醒 → 系统通知排程计划（纯函数，可测）
-    tasks.ts         待办重复规则
-    storage.ts       localStorage 读写、schema 版本、备份
-    platform.ts      平台判断（网页 / 安卓 / iOS）
-    notifications.ts 通知能力封装（系统本地通知 / 浏览器通知）
-    reminderSync.ts  提醒排程入口
-    saveFile.ts      导出文件（网页下载 / 安卓分享）
-    download.ts      浏览器下载与文件选择
-  components/         UI 基础组件
-  pages/              今天 / 课表 / 待办 / 设置
-  state/store.tsx     全局状态
-android/              Capacitor 安卓工程
+  main.tsx / App.tsx        入口、四个 tab、全局「+ 添加」浮动按钮
+  navigation.ts             tab 定义
+  types.ts                  Course / Task / PeriodTime / Settings 等核心类型
+
+  lib/                      纯逻辑，基本都有单测
+    ics.ts                  RFC 5545 输出：按 UTF-8 字节折行、转义、周次展开
+    weeks.ts                周次与日期推算（currentWeek、学期边界）
+    periods.ts              作息时间表，大节 → 小节展开
+    parseCourses.ts         「一行一节课」文本解析，容错全角逗号与缺列
+    reminders.ts            提醒时刻推算：remindersForDate / dueReminders / nextReminder
+    notifyPlan.ts           提醒 → 系统通知排程计划（ID 稳定、限条数、跨重启去重）
+    tasks.ts                待办重复规则与五档分组
+    freeSlots.ts            空档计算（区间合并 + 窗口裁剪）
+    courseColors.ts         课程配色，未指定时按 id 稳定分配
+    samples.ts              示例课表数据
+
+  lib/                      平台相关（网页 / 安卓双实现）
+    platform.ts             平台判断
+    notifications.ts        通知能力封装（系统本地通知 / 浏览器通知）
+    reminderSync.ts         排程入口，记录上次排程时间
+    storage.ts              localStorage 分键读写 + schema 版本 + 备份导入导出
+    saveFile.ts             导出文件（安卓走系统分享面板）
+    download.ts             浏览器下载与文件选择
+
+  components/ui.tsx         基础组件（Button / Card / Field / Tag 等）
+  pages/                    四个页面，只负责展示与交互
+  hooks/
+    useNow.ts               定时刷新的当前时间
+    useReminderTicker.ts    网页端轮询弹通知；安卓端定时续排
+  state/
+    store.tsx               全局状态（Context + localStorage 持久化）
+    quickAdd.ts             跨页「+ 添加」指令通道
+
+android/                    Capacitor 8 安卓工程（同步生成的产物已 gitignore）
 ```
+
+### 几个刻意的取舍
+
+- **导出的 `.ics` 不用 `RRULE`**：课表按周次展开成一条条独立 `VEVENT`。
+  「1-16 周 + 单周」这种组合没法用一条 `RRULE` 精确表达，展开后 1-16 周的课就是 16 个事件，
+  啰嗦但不会出错。
+- **提醒只排未来 14 天、上限 200 条**：安卓对单应用待发闹钟数量有隐性限制，一路排到期末会被系统丢掉。
+  每次打开应用自动续排，回到前台超过 6 小时也补一次。
+- **数据分键存 + schema 版本号**：`todos` / `courses` / `settings` 分开存，`SCHEMA_VERSION` 管迁移。
+  加课程配色字段时升到 2，老数据读取时自动补空值，用户不用手动导一遍。
+  以后换 Capacitor Preferences 只需要改 `storage.ts`。
+- **`localStorage` 不加密**：数据量不到 1MB，内容就是自己的课表，加密只会挡住自己调试。
+- **批量录入宁可宽松**：从教务系统复制出来的文本常带全角逗号、多余空格、空列。
+  宽松解析 + 预览确认，好过因为一个标点让用户重录一遍。
+
+### 测试覆盖
+
+| 用例文件 | 条数 | 压的重点 |
+| --- | ---: | --- |
+| `ics.test.ts` | 28 | 事件展开、文本转义、提前量、排序 |
+| `ics.fold.test.ts` | 2 | 折行后逐字还原、每行不超过 75 字节 |
+| `ics.golden.test.ts` | 1 | 整份 `.ics` 输出逐字节锁死 |
+| `ics.e2e.test.ts` | 6 | 从课程 / 待办一路到最终文本 |
+| `reminders.test.ts` | 21 | 单日与多日展开、单双周、提前量、状态判定 |
+| `parseCourses.test.ts` | 16 | 全角逗号、缺列、多种星期与节次写法 |
+| `weeks.test.ts` | 13 | 开学前 / 当天 / 周末、周次边界 |
+| `periods.test.ts` | 13 | 大节展开、时间解析容错 |
+| `tasks.test.ts` | 13 | 重复规则、五档分组 |
+| `freeSlots.test.ts` | 13 | 区间合并、窗口裁剪、最短时长过滤 |
+| `notifyPlan.test.ts` | 12 | 通知 ID 稳定、条数上限、去重 |
+| **合计** | **138** | |
+
+## 下一步
+
+用 WebView 登录教务系统自动抓取课表。代码结构已经把它隔离好了：抓取只需要产出 `CourseDraft[]`
+交给 `addCourses()`，UI 和业务逻辑都不用动。
+
+这也是当初把 `lib/` 做成纯函数的原因之一 —— 解析器接进来就能直接写单测。
